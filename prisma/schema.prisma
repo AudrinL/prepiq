@@ -1,0 +1,540 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["relationJoins", "fullTextSearch"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ENUMS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+enum GlobalRole {
+  SUPER_ADMIN
+  ADMIN
+  USER
+}
+
+enum OrgMemberRole {
+  ADMIN
+  MANAGER
+  VIEWER
+}
+
+enum TestCategorySlug {
+  NUMERICAL
+  VERBAL
+  ABSTRACT
+  SITUATIONAL
+  PERSONALITY
+  EMOTIONAL_INTELLIGENCE
+}
+
+enum DifficultyLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  FROZEN    // suspended by super admin
+  CLOSED    // manually closed by org
+  EXPIRED   // past end date
+}
+
+enum ParticipantStatus {
+  INVITED
+  STARTED
+  COMPLETED
+  EXPIRED
+  WITHDRAWN
+}
+
+enum OrgPlan {
+  STARTER
+  PRO
+  ENTERPRISE
+}
+
+enum OrgStatus {
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// IDENTITY & AUTH
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model User {
+  id              String      @id @default(cuid())
+  name            String
+  email           String      @unique
+  password        String?     // null for OAuth-only accounts
+  image           String?
+  role            GlobalRole  @default(USER)
+  isActive        Boolean     @default(true)
+  emailVerified   DateTime?
+  lastActiveAt    DateTime?
+  timezone        String      @default("UTC")
+  locale          String      @default("en")
+  deletedAt       DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  createdById     String?
+
+  // Relations
+  accounts         Account[]
+  sessions         Session[]
+  attempts         TestAttempt[]
+  guestAttempts    GuestAttempt[]
+  orgMemberships   OrgMember[]
+  roleChangesGiven RoleAuditLog[] @relation("ChangedBy")
+  roleChangesGot   RoleAuditLog[] @relation("Target")
+  adminLogs        AdminActionLog[]
+  refreshTokens    RefreshToken[]
+
+  @@index([email])
+  @@index([role, isActive])
+  @@index([deletedAt])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, revokedAt])
+  @@index([token])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  ipAddress    String?
+  userAgent    String?
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  id         String   @id @default(cuid())
+  identifier String
+  token      String   @unique
+  type       String   @default("EMAIL_VERIFY") // EMAIL_VERIFY | PASSWORD_RESET
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime @default(now())
+
+  @@unique([identifier, token])
+  @@index([token])
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ORGANIZATIONS & MULTI-TENANCY
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model Organization {
+  id                  String    @id @default(cuid())
+  name                String
+  slug                String    @unique
+  email               String
+  billingEmail        String?
+  plan                OrgPlan   @default(STARTER)
+  status              OrgStatus @default(ACTIVE)
+  seatsLimit          Int       @default(50)
+  logoUrl             String?
+  primaryColor        String    @default("#6366F1")
+  dataRegion          String    @default("us-east-1") // for future data residency
+  deletedAt           DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  createdBySuperAdminId String?
+  suspendedAt         DateTime?
+  suspendedReason     String?
+  suspendedById       String?
+
+  members     OrgMember[]
+  campaigns   Campaign[]
+  invitations CampaignInvitation[]
+  apiKeys     OrgApiKey[]
+
+  @@index([status, plan])
+  @@index([slug])
+  @@index([deletedAt])
+}
+
+model OrgMember {
+  id          String        @id @default(cuid())
+  orgId       String
+  org         Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        OrgMemberRole @default(VIEWER)
+  invitedAt   DateTime      @default(now())
+  acceptedAt  DateTime?
+  invitedById String?
+
+  @@unique([orgId, userId])
+  @@index([orgId, role])
+  @@index([userId])
+}
+
+model OrgApiKey {
+  id          String       @id @default(cuid())
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name        String
+  keyHash     String       @unique // bcrypt hash of the actual key
+  keyPrefix   String       // first 8 chars for display ("sk_live_ab12...")
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime     @default(now())
+  createdById String
+
+  @@index([orgId])
+  @@index([keyHash])
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TEST CONTENT
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model TestCategory {
+  id          String           @id @default(cuid())
+  slug        TestCategorySlug @unique
+  label       String
+  description String
+  iconName    String
+  color       String
+  sortOrder   Int              @default(0)
+  isActive    Boolean          @default(true)
+  createdAt   DateTime         @default(now())
+
+  tests Test[]
+}
+
+model Test {
+  id                  String          @id @default(cuid())
+  categoryId          String
+  category            TestCategory    @relation(fields: [categoryId], references: [id])
+  level               DifficultyLevel
+  title               String
+  description         String?
+  totalDurationSecs   Int             // Level 2: test-level total time
+  defaultQuestionSecs Int?            // Level 2: per-question default (null = auto-calc)
+  minQuestions        Int             @default(20)
+  maxQuestions        Int             @default(30)
+  isActive            Boolean         @default(false) // starts unpublished
+  publishedAt         DateTime?
+  deletedAt           DateTime?
+  version             Int             @default(1)     // optimistic concurrency
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  createdById         String?
+  updatedById         String?
+
+  questions     Question[]
+  attempts      TestAttempt[]
+  guestAttempts GuestAttempt[]
+  campaigns     CampaignsOnTests[]
+
+  @@index([categoryId, level, isActive])
+  @@index([isActive, publishedAt])
+  @@index([deletedAt])
+}
+
+model Question {
+  id              String   @id @default(cuid())
+  testId          String
+  test            Test     @relation(fields: [testId], references: [id], onDelete: Cascade)
+  text            String
+  richText        Json?    // for markdown/math notation rendering
+  imageUrl        String?
+  options         Json     // [{ id: "A", text: "..." }, { id: "B", text: "..." }, ...]
+  correctOptionId String   // "A" | "B" | "C" | "D"
+  explanation     String
+  richExplanation Json?
+  difficulty      Int      @default(3)    // 1-5 — used for adaptive testing
+  topic           String
+  timeLimitSecs   Int?                    // Level 4: per-question override
+  sortOrder       Int      @default(0)
+  isActive        Boolean  @default(true)
+  deletedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  createdById     String?
+  updatedById     String?
+
+  @@index([testId, difficulty, isActive])
+  @@index([testId, topic])
+  @@index([deletedAt])
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TEST ATTEMPTS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model TestAttempt {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  testId          String
+  test            Test      @relation(fields: [testId], references: [id])
+  organizationId  String?   // null for personal practice
+  campaignId      String?   // null for personal practice
+  invitationId    String?   @unique
+  invitation      CampaignInvitation? @relation(fields: [invitationId], references: [id])
+  questionOrder   Json      // ordered array of questionIds (shuffled at start)
+  answers         Json      @default("{}")  // { questionId: selectedOptionId }
+  score           Int?      // percentage 0-100
+  correctCount    Int?
+  totalQuestions  Int
+  timeTakenSecs   Int?
+  violationCount  Int       @default(0)
+  autoSubmitted   Boolean   @default(false)
+  submissionReason String?  // "TIMER_EXPIRED" | "VIOLATIONS_EXCEEDED" | "MANUAL"
+  startedAt       DateTime  @default(now())
+  submittedAt     DateTime?
+  lastSavedAt     DateTime?
+  expiresAt       DateTime  // startedAt + test duration (for timeout detection)
+  version         Int       @default(1)
+
+  integrityLogs TestIntegrityLog[]
+
+  @@index([userId, startedAt])
+  @@index([testId, score])
+  @@index([organizationId, campaignId])
+  @@index([submittedAt])
+  @@index([expiresAt]) // for cleanup job: find abandoned attempts
+}
+
+model TestIntegrityLog {
+  id           String      @id @default(cuid())
+  attemptId    String
+  attempt      TestAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  eventType    String
+  // TAB_SWITCH | FULLSCREEN_EXIT | ESCAPE_KEY | QUESTION_TIMER_EXPIRE
+  // | TEST_TIMER_EXPIRE | AUTO_SUBMIT | MANUAL_SUBMIT | AUTO_SAVE
+  violationNum Int?
+  metadata     Json?       // { userAgent, timestamp, questionId }
+  createdAt    DateTime    @default(now())
+
+  @@index([attemptId])
+}
+
+model GuestAttempt {
+  id          String    @id @default(cuid())
+  fingerprint String
+  testId      String
+  test        Test      @relation(fields: [testId], references: [id])
+  answers     Json?
+  score       Int?
+  completedAt DateTime?
+  migratedToUserId String? // set when guest signs up and attempts are transferred
+  migratedToUser   User?     @relation(fields: [migratedToUserId], references: [id])
+  createdAt   DateTime  @default(now())
+
+  @@index([fingerprint])
+  @@index([migratedToUserId])
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CAMPAIGNS & INVITATIONS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model Campaign {
+  id                String         @id @default(cuid())
+  orgId             String
+  org               Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name              String
+  description       String?
+  status            CampaignStatus @default(DRAFT)
+  startDate         DateTime
+  endDate           DateTime
+  customTimerSecs   Int?           // Level 3: campaign-level override
+  sendReminder      Boolean        @default(true)
+  reminderHoursBefore Int          @default(24)
+  allowAnonymous    Boolean        @default(false)
+  passingScore      Int?           // optional threshold (0-100)
+  deletedAt         DateTime?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  createdById       String?
+  updatedById       String?
+
+  tests       CampaignsOnTests[]
+  invitations CampaignInvitation[]
+
+  @@index([orgId, status])
+  @@index([status, endDate])
+  @@index([deletedAt])
+}
+
+model CampaignsOnTests {
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  testId     String
+  test       Test     @relation(fields: [testId], references: [id])
+  sortOrder  Int      @default(0)
+  customTimerSecs Int? // per-test-per-campaign override
+
+  @@id([campaignId, testId])
+}
+
+model CampaignInvitation {
+  id              String            @id @default(cuid())
+  campaignId      String
+  campaign        Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  orgId           String
+  org             Organization      @relation(fields: [orgId], references: [id])
+  email           String
+  name            String?
+  token           String            @unique @default(cuid())
+  status          ParticipantStatus @default(INVITED)
+  reminderSentAt  DateTime?
+  emailBounced    Boolean           @default(false)
+  sentAt          DateTime          @default(now())
+  openedAt        DateTime?
+  acceptedAt      DateTime?
+  completedAt     DateTime?
+  attempt         TestAttempt?
+
+  @@unique([campaignId, email])
+  @@index([campaignId, status])
+  @@index([token])
+  @@index([orgId])
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// PLATFORM CONFIGURATION
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model PlatformSettings {
+  id                     String   @id @default(cuid())
+  platformName           String   @default("PrepIQ")
+
+  // Level 1 timer defaults (seconds)
+  defaultNumericalSecs   Int      @default(2400)
+  defaultVerbalSecs      Int      @default(1800)
+  defaultAbstractSecs    Int      @default(2400)
+  defaultSituationalSecs Int      @default(2700)
+  defaultPersonalitySecs Int      @default(1800)
+  defaultEiSecs          Int      @default(1800)
+  defaultQuestionSecs    Int      @default(120)
+
+  // Feature flags
+  leaderboardPublic      Boolean  @default(true)
+  groupChallengesEnabled Boolean  @default(true)
+  freeTestLimit          Int      @default(3)
+  maxQuestionsPerTest    Int      @default(30)
+  minQuestionsPerTest    Int      @default(10)
+  adaptiveTestingEnabled Boolean  @default(true)
+  orgSignupEnabled       Boolean  @default(true)
+
+  // Maintenance
+  maintenanceMode        Boolean  @default(false)
+  maintenanceMessage     String?
+  maintenanceUntil       DateTime?
+
+  updatedAt              DateTime @updatedAt
+  updatedById            String?
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AUDIT & OBSERVABILITY
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model RoleAuditLog {
+  id          String     @id @default(cuid())
+  changedById String
+  changedBy   User       @relation("ChangedBy", fields: [changedById], references: [id])
+  targetId    String
+  target      User       @relation("Target", fields: [targetId], references: [id])
+  oldRole     GlobalRole
+  newRole     GlobalRole
+  reason      String     // mandatory — cannot be null
+  ipAddress   String?
+  createdAt   DateTime   @default(now())
+
+  @@index([targetId, createdAt])
+  @@index([changedById, createdAt])
+}
+
+model AdminActionLog {
+  id          String   @id @default(cuid())
+  actorId     String
+  actor       User     @relation(fields: [actorId], references: [id])
+  actionType  String
+  // CREATE_ORG | SUSPEND_ORG | DELETE_ORG | PUBLISH_TEST | UNPUBLISH_TEST
+  // | CREATE_QUESTION | EDIT_QUESTION | DELETE_QUESTION | CHANGE_SETTINGS
+  // | PROMOTE_ADMIN | DEMOTE_ADMIN | SUSPEND_USER | BULK_IMPORT
+  entityType  String?  // "Organization" | "Test" | "Question" | "User"
+  entityId    String?
+  diff        Json?    // before/after snapshot for edit operations
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([actionType, createdAt])
+  @@index([entityType, entityId])
+}
+
+model BackgroundJob {
+  id          String    @id @default(cuid())
+  queue       String    // "email" | "report" | "cleanup" | "analytics"
+  jobType     String
+  payload     Json
+  status      JobStatus @default(PENDING)
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(5)
+  error       String?
+  scheduledAt DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([queue, status, scheduledAt])
+  @@index([status, createdAt])
+}
